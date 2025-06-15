@@ -81,7 +81,7 @@ EMPTY CELLS TO FILL: {empty_cells_str}
 
 INSTRUCTIONS:
 1. Quickly analyze the constraints for each empty cell using ANY Sudoku constraints (row, column, 3x3 box) - YOU DO NOT HAVE TO CHECK ALL CONSTRAINTS. 
-2. For each empty cell, determine the missing digit that fits the grid.
+2. For all empty cells, determine the missing digit that fits in a logical and systematic and highly efficient way.
 3. Return your solution in this EXACT format:
 
 SOLUTION:
@@ -145,33 +145,66 @@ Rules: Each row, column, and 3×3 box must contain digits 1-9 exactly once."""
         prompt = self.create_efficient_prompt(quiz, empty_cells, clue_count)
         
         try:
+            print(f"\nSending request to DeepSeek API...")
+            print(f"Empty cells to fill: {len(empty_cells)}")
+            print(f"Prompt length: {len(prompt)} characters")
+            
             start_time = time.time()
             
-            response = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self.client.chat.completions.create,
-                    model=self.model,
-                    messages=[
-                        {
-                            "role": "system", 
-                            "content": "You are an expert Sudoku solver. Analyze constraints efficiently and provide exact solutions in the requested format."
-                        },
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=1500,  # Reduced since we need less formatting
-                    temperature=0.1,
-                    timeout=90
-                ),
-                timeout=120
-            )
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self.client.chat.completions.create,
+                        model=self.model,
+                        messages=[
+                            {
+                                "role": "system", 
+                                "content": "You are an expert Sudoku solver. Analyze constraints efficiently and provide exact solutions in the requested format."
+                            },
+                            {"role": "user", "content": prompt}
+                        ],
+                        max_tokens=32000,
+                        temperature=0.1,
+                        timeout=600
+                    ),
+                    timeout=600
+                )
+                
+                print("✅ Received response from API")
+                
+            except asyncio.TimeoutError:
+                print("❌ Request timed out")
+                return {
+                    'success': False,
+                    'quiz': quiz,
+                    'solution': solution,
+                    'clue_count': clue_count,
+                    'error': 'Request timed out',
+                    'error_type': 'TimeoutError'
+                }
+            except Exception as api_error:
+                print(f"❌ API Error: {str(api_error)}")
+                return {
+                    'success': False,
+                    'quiz': quiz,
+                    'solution': solution,
+                    'clue_count': clue_count,
+                    'error': str(api_error),
+                    'error_type': type(api_error).__name__
+                }
             
             elapsed_time = time.time() - start_time
             
             reasoning_content = response.choices[0].message.reasoning_content or ""
             final_answer = response.choices[0].message.content or ""
             
+            print(f"\nResponse received in {elapsed_time:.1f} seconds")
+            print(f"Reasoning content length: {len(reasoning_content)} characters")
+            print(f"Final answer length: {len(final_answer)} characters")
+            
             # Extract solutions from response
             extracted_solutions = self.extract_cell_solutions(final_answer, empty_cells)
+            print(f"Extracted {len(extracted_solutions)} solutions from response")
             
             # Apply solutions to create complete grid
             solved_grid = self.apply_solutions_to_grid(quiz, extracted_solutions)
@@ -202,6 +235,11 @@ Rules: Each row, column, and 3×3 box must contain digits 1-9 exactly once."""
             return result
             
         except Exception as e:
+            print(f"❌ Unexpected error: {str(e)}")
+            print(f"Error type: {type(e).__name__}")
+            import traceback
+            print("Full traceback:")
+            print(traceback.format_exc())
             return {
                 'success': False,
                 'quiz': quiz,
@@ -338,12 +376,16 @@ class OptimizedSudokuCoTTrainingGenerator:
                             print(f"     All cells filled but solution incorrect")
                 else:
                     print(f"  ❌ Failed: {result.get('error', 'Unknown error')}")
+                    print(f"  Error type: {result.get('error_type', 'Unknown')}")
                 
                 # Rate limiting
                 await asyncio.sleep(0.5)
-                
+            
             except Exception as e:
                 print(f"  ❌ Exception: {e}")
+                import traceback
+                print("  Full traceback:")
+                print(traceback.format_exc())
         
         print(f"\n📊 GENERATION COMPLETE:")
         print(f"  💰 Total cost: ${total_cost:.6f}")
@@ -460,8 +502,8 @@ async def main():
     if not API_KEY:
         raise ValueError("DEEPSEEK_API_KEY not found in environment variables. Please set it in .env file")
     
-    CLUE_COUNT = 80  # Start with easiest puzzles (only 1 empty cell)
-    NUM_EXAMPLES = 5  # Test with more examples
+    CLUE_COUNT = 50  # Start with easiest puzzles (only 1 empty cell)
+    NUM_EXAMPLES = 1  # Test with more examples
     
     # Initialize generator
     generator = OptimizedSudokuCoTTrainingGenerator(API_KEY)
