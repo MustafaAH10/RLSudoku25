@@ -8,7 +8,7 @@ import re
 from datetime import datetime
 
 class SudokuBenchmark:
-    def __init__(self, model_name, max_tokens=1500, temperature=0.1):
+    def __init__(self, model_name, max_tokens=2500, temperature=0.1):
         self.model_name = model_name
         self.max_tokens = max_tokens
         self.temperature = temperature
@@ -27,6 +27,7 @@ class SudokuBenchmark:
             self.tokenizer.pad_token = self.tokenizer.eos_token
         
         print(f"Model loaded on device: {self.model.device}")
+        print(f"Using max_tokens: {max_tokens}, temperature: {temperature}")
     
     def format_sudoku_grid(self, grid):
         """Format 9x9 grid for display with box separators"""
@@ -143,6 +144,9 @@ SOLUTION:
                 do_sample=True if self.temperature > 0 else False,
                 pad_token_id=self.tokenizer.eos_token_id,
                 eos_token_id=self.tokenizer.eos_token_id,
+                num_return_sequences=1,
+                top_p=0.95,
+                repetition_penalty=1.1
             )
         
         generation_time = time.time() - start_time
@@ -172,7 +176,7 @@ SOLUTION:
                 "total_tokens": total_tokens,
                 "generation_time": generation_time,
                 "tokens_per_second": tokens_per_second,
-                "has_thinking": False
+                "has_thinking": "<thinking>" in response.lower()
             },
             "evaluation": evaluation,
             "expected_solutions": expected_solutions,
@@ -231,7 +235,7 @@ def main():
     parser.add_argument("--model_name", type=str, required=True, help="Model name or path")
     parser.add_argument("--test_data", type=str, default="test_data/sudoku_rl_test.json", help="Test data path")
     parser.add_argument("--output_file", type=str, required=True, help="Output file for results")
-    parser.add_argument("--max_tokens", type=int, default=1500, help="Maximum tokens to generate")
+    parser.add_argument("--max_tokens", type=int, default=2500, help="Maximum tokens to generate")
     parser.add_argument("--temperature", type=float, default=0.1, help="Generation temperature")
     parser.add_argument("--total_samples", type=int, help="Limit number of test samples")
     

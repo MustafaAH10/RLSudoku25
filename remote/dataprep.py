@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Fixed Data Preparation using Kagglehub
-=====================================
-Downloads 4M Sudoku dataset and creates train/val/test splits
+Enhanced Data Preparation using Kagglehub
+==========================================
+Downloads 4M Sudoku dataset and creates train/val/test splits with better distribution
 """
 
 import pandas as pd
@@ -85,7 +85,7 @@ class SudokuDataPreparator:
     
     def assign_difficulty(self, clue_count: int) -> str:
         """Assign difficulty based on clue count"""
-        if clue_count >= 60:
+        if clue_count >= 70:
             return "beginner"
         elif clue_count >= 50:
             return "easy"
@@ -104,10 +104,10 @@ class SudokuDataPreparator:
         
         print("\n🎯 Creating stratified dataset splits...")
         
-        # Target sizes
-        TRAIN_SIZE = 5000  # More training data for RL
-        VAL_SIZE = 1000    # Validation during training
-        TEST_SIZE = 1000   # Final evaluation
+        # Updated target sizes - more focused on training
+        TRAIN_SIZE = 8000   # Increased for better RL training
+        VAL_SIZE = 1000     # Validation during training
+        TEST_SIZE = 500     # Final evaluation (smaller for faster benchmarking)
         
         print(f"📊 Target sizes:")
         print(f"   Training: {TRAIN_SIZE}")
@@ -122,15 +122,15 @@ class SudokuDataPreparator:
         return train_samples, val_samples, test_samples
     
     def get_stratified_sample(self, target_size: int, split_name: str) -> List[Dict]:
-        """Get stratified sample by difficulty"""
+        """Get stratified sample by difficulty with updated distribution"""
         
-        # Difficulty distribution (balanced)
+        # Updated difficulty distribution - focus more on medium/hard for RL
         difficulty_ratios = {
-            'expert': 0.20,    
-            'hard': 0.20,      
-            'medium': 0.20,    
-            'easy': 0.20,      
-            'beginner': 0.20   
+            'expert': 0.15,    # Challenging but manageable
+            'hard': 0.25,      # Main focus for RL improvement
+            'medium': 0.30,    # Core training difficulty
+            'easy': 0.20,      # Baseline performance
+            'beginner': 0.10   # Quick wins
         }
         
         all_samples = []
@@ -172,7 +172,7 @@ class SudokuDataPreparator:
                 solution_dict = self.solution_to_dict(row['quizzes'], row['solutions'])
                 
                 sample = {
-                    'id': f"{split_name}_{difficulty}_{len(all_samples)+1:03d}",
+                    'id': f"{split_name}_{difficulty}_{len(all_samples)+1:04d}",
                     'difficulty': difficulty,
                     'puzzle': puzzle_grid,
                     'solution': solution_dict,
@@ -199,17 +199,17 @@ class SudokuDataPreparator:
         return all_samples
     
     def save_datasets(self, train_samples: List[Dict], val_samples: List[Dict], test_samples: List[Dict]):
-        """Save all datasets"""
+        """Save all datasets with consistent paths"""
         
         # Create directories
-        for dir_name in ['training_data', 'test_data']:
+        for dir_name in ['data', 'data/train', 'data/val', 'data/test', 'wandb']:
             Path(dir_name).mkdir(exist_ok=True)
         
-        # Save files
+        # Save files with consistent naming
         datasets = [
-            (train_samples, 'training_data/sudoku_rl_train.json'),
-            (val_samples, 'training_data/sudoku_rl_val.json'),  # Val goes with training
-            (test_samples, 'test_data/sudoku_rl_test.json')
+            (train_samples, 'data/train/sudoku_train.json'),
+            (val_samples, 'data/val/sudoku_val.json'),
+            (test_samples, 'data/test/sudoku_test.json')
         ]
         
         for samples, filepath in datasets:
@@ -217,19 +217,22 @@ class SudokuDataPreparator:
             with open(filepath, 'w') as f:
                 json.dump(samples, f, indent=2)
         
-        # Create legacy format for compatibility
-        with open('train_data.json', 'w') as f:
+        # Create legacy format for compatibility (trainer expects these)
+        with open('data/train_data.json', 'w') as f:
             json.dump(train_samples, f, indent=2)
-        with open('val_data.json', 'w') as f:
+        with open('data/val_data.json', 'w') as f:
             json.dump(val_samples, f, indent=2)
+        with open('data/test_data.json', 'w') as f:
+            json.dump(test_samples, f, indent=2)
         
         # Save statistics
         self.save_statistics(train_samples, val_samples, test_samples)
         
         print(f"\n✅ All datasets saved!")
-        print(f"📁 Training: training_data/sudoku_rl_train.json ({len(train_samples)} samples)")
-        print(f"📁 Validation: training_data/sudoku_rl_val.json ({len(val_samples)} samples)")
-        print(f"📁 Test: test_data/sudoku_rl_test.json ({len(test_samples)} samples)")
+        print(f"📁 Training: data/train/sudoku_train.json ({len(train_samples)} samples)")
+        print(f"📁 Validation: data/val/sudoku_val.json ({len(val_samples)} samples)")
+        print(f"📁 Test: data/test/sudoku_test.json ({len(test_samples)} samples)")
+        print(f"📁 Legacy files: data/train_data.json, data/val_data.json, data/test_data.json")
     
     def save_statistics(self, train_samples: List[Dict], val_samples: List[Dict], test_samples: List[Dict]):
         """Save dataset statistics"""
@@ -238,11 +241,19 @@ class SudokuDataPreparator:
             stats = {}
             for difficulty in ['expert', 'hard', 'medium', 'easy', 'beginner']:
                 count = len([s for s in samples if s['difficulty'] == difficulty])
-                stats[difficulty] = count
+                percentage = (count / len(samples)) * 100 if samples else 0
+                stats[difficulty] = {'count': count, 'percentage': round(percentage, 1)}
             return stats
         
         statistics = {
             'total_samples': len(train_samples) + len(val_samples) + len(test_samples),
+            'data_preparation_config': {
+                'random_seed': self.random_seed,
+                'train_size': len(train_samples),
+                'val_size': len(val_samples),
+                'test_size': len(test_samples),
+                'difficulty_distribution_strategy': 'stratified_with_rl_focus'
+            },
             'splits': {
                 'train': {
                     'count': len(train_samples),
@@ -257,25 +268,31 @@ class SudokuDataPreparator:
                     'difficulty_distribution': get_difficulty_stats(test_samples)
                 }
             },
+            'file_paths': {
+                'train': 'data/train/sudoku_train.json',
+                'val': 'data/val/sudoku_val.json',
+                'test': 'data/test/sudoku_test.json',
+                'legacy_train': 'data/train_data.json',
+                'legacy_val': 'data/val_data.json',
+                'legacy_test': 'data/test_data.json'
+            },
             'uniqueness_verified': True
         }
         
-        # Save to both directories
-        for directory in ['training_data', 'test_data']:
-            stats_path = Path(directory) / 'dataset_statistics.json'
-            with open(stats_path, 'w') as f:
-                json.dump(statistics, f, indent=2)
+        # Save to data directory
+        with open('data/dataset_statistics.json', 'w') as f:
+            json.dump(statistics, f, indent=2)
         
         # Print summary
         print(f"\n📊 Dataset Statistics:")
         for split_name, split_stats in statistics['splits'].items():
             print(f"   {split_name.capitalize()}: {split_stats['count']} samples")
-            for diff, count in split_stats['difficulty_distribution'].items():
-                print(f"     {diff}: {count}")
+            for diff, diff_stats in split_stats['difficulty_distribution'].items():
+                print(f"     {diff}: {diff_stats['count']} ({diff_stats['percentage']}%)")
 
 def main():
     """Main function"""
-    print("🎲 Sudoku Dataset Preparation with Kagglehub")
+    print("🎲 Enhanced Sudoku Dataset Preparation")
     print("=" * 50)
     
     try:
@@ -290,7 +307,8 @@ def main():
         # Save datasets
         preparator.save_datasets(train_samples, val_samples, test_samples)
         
-        print(f"\n🎉 SUCCESS! Ready for RL training")
+        print(f"\n🎉 SUCCESS! Enhanced dataset ready for RL training")
+        print(f"📈 Focused on medium/hard difficulties for better RL learning")
         
     except Exception as e:
         print(f"❌ Error: {e}")
