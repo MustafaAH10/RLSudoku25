@@ -1,0 +1,167 @@
+SUDOKU RL EXPERIMENT INSTRUCTIONS
+================================
+
+1. INITIAL SETUP
+---------------
+# SSH into your rented GPU server
+ssh user@your_gpu_server
+
+# Create project directory
+mkdir RLSudoku25
+cd RLSudoku25
+
+# Create necessary directories
+mkdir -p data/{train,val,test} benchmarks wandb
+
+# Install requirements
+pip install -r requirements.txt
+pip install wandb
+
+# Login to WandB (you'll need your API key from wandb.ai)
+wandb login
+
+2. DATA PREPARATION
+------------------
+# Run data preparation script
+python dataprep.py
+
+# This will:
+# - Download the Kaggle dataset
+# - Create train/val/test splits
+# - Save files in data/train/, data/val/, data/test/
+# - Create statistics in data/dataset_statistics.json
+
+# Verify the data was created:
+ls -l data/train data/val data/test
+cat data/dataset_statistics.json
+
+3. BASELINE BENCHMARK
+--------------------
+# Run benchmark on the foundation model
+python sudoku_benchmark.py \
+    --model_name "Qwen/Qwen2.5-7B-Instruct" \
+    --test_data "data/test/sudoku_test.json" \
+    --output_file "benchmarks/baseline_results.json" \
+    --max_tokens 2500 \
+    --temperature 0.1 \
+    --total_samples 100
+
+# This will:
+# - Load the foundation model
+# - Test it on the test set
+# - Save results to benchmarks/baseline_results.json
+# - Print summary statistics
+
+# Run test benchmark (1 sample) - Expected runtime: ~1 minute
+python sudoku_benchmark.py \
+    --model_name "Qwen/Qwen2.5-7B-Instruct" \
+    --test_data "data/test/sudoku_test.json" \
+    --output_file "benchmarks/test_sample.json" \
+    --max_tokens 2500 \
+    --temperature 0.7 \
+    --total_samples 1
+
+# This will:
+# - Load the foundation model
+# - Test it on a single puzzle
+# - Save results to benchmarks/test_sample.json
+# - Print detailed output for the single puzzle
+
+4. RL TRAINING
+-------------
+# Create training configuration
+python create_training_config.py
+
+# Edit the config to set your WandB username
+nano rl_config.json
+# Find "wandb_entity" and set it to your WandB username
+
+# Start training
+python trainer.py
+
+# This will:
+# - Initialize WandB tracking
+# - Load the foundation model
+# - Train using RL on the training set
+# - Validate on the validation set
+# - Save checkpoints to sudoku-rl-model/
+# - Log metrics to WandB
+
+# Monitor training:
+# - Watch GPU usage: nvidia-smi
+# - Monitor progress: wandb.ai (your project dashboard)
+
+5. POST-TRAINING BENCHMARK
+-------------------------
+# Run benchmark on the RL-trained model
+python sudoku_benchmark.py \
+    --model_name "./sudoku-rl-model" \
+    --test_data "data/test/sudoku_test.json" \
+    --output_file "benchmarks/rl_trained_results.json" \
+    --max_tokens 2500 \
+    --temperature 0.1 \
+    --total_samples 100
+
+# This will:
+# - Load the RL-trained model
+# - Test it on the same test set
+# - Save results to benchmarks/rl_trained_results.json
+# - Print summary statistics
+
+6. COMPARE RESULTS
+-----------------
+# Compare baseline and RL-trained results
+python analyze_results.py \
+    --baseline "benchmarks/baseline_results.json" \
+    --post_training "benchmarks/rl_trained_results.json"
+
+7. SAVE RESULTS
+--------------
+# Create a results archive
+tar -czf sudoku_rl_results.tar.gz \
+    benchmarks/ \
+    sudoku-rl-model/ \
+    wandb/ \
+    data/dataset_statistics.json
+
+# Transfer results to your local machine
+# (Run this on your local machine, not the server)
+scp user@your_gpu_server:/path/to/RLSudoku25/sudoku_rl_results.tar.gz ./
+
+8. OPTIONAL: UPLOAD TO HUGGING FACE
+----------------------------------
+# Install huggingface_hub
+pip install huggingface_hub
+
+# Login to Hugging Face
+huggingface-cli login
+
+# Upload model
+python -c "
+from huggingface_hub import HfApi
+api = HfApi()
+api.upload_folder(
+    folder_path='sudoku-rl-model',
+    repo_id='your-username/sudoku-rl-model',
+    repo_type='model'
+)
+"
+
+IMPORTANT NOTES:
+---------------
+1. All data files are in the data/ directory
+2. All benchmark results are in the benchmarks/ directory
+3. The trained model is in sudoku-rl-model/
+4. WandB logs are in wandb/
+5. The experiment is tracked in your WandB project dashboard
+6. Make sure to replace:
+   - user@your_gpu_server with your actual server details
+   - your-username with your actual Hugging Face username
+   - your WandB API key when logging in
+
+MONITORING:
+----------
+1. GPU Usage: nvidia-smi
+2. Training Progress: wandb.ai dashboard
+3. Disk Space: df -h
+4. Memory Usage: free -h 

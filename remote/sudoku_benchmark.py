@@ -52,7 +52,7 @@ class SudokuBenchmark:
         """Create the prompt for solving Sudoku"""
         formatted_grid = self.format_sudoku_grid(puzzle_grid)
         
-        prompt = f"""Solve this Sudoku puzzle completely. Provide ONLY the solution in the exact format shown below.
+        prompt = f"""Solve this Sudoku puzzle completely. Show your thinking process and provide the solution in the exact format shown below.
 
 Puzzle:
 ```
@@ -60,12 +60,13 @@ Puzzle:
 ```
 
 Instructions:
-- Fill ALL empty cells (marked with _)
+- First, analyze the puzzle and show your thinking process
+- Then fill ALL empty cells (marked with _)
 - Each row, column, and 3x3 box must contain digits 1-9 exactly once
-- Provide your complete solution using ONLY this format: RnCm: digit
+- Finally, provide your complete solution using ONLY this format: RnCm: digit
 - List every empty cell's solution
 
-SOLUTION:
+THINKING:
 """
         return prompt
     
@@ -146,7 +147,11 @@ SOLUTION:
                 eos_token_id=self.tokenizer.eos_token_id,
                 num_return_sequences=1,
                 top_p=0.95,
-                repetition_penalty=1.1
+                repetition_penalty=1.1,
+                use_cache=True,
+                return_dict_in_generate=True,
+                output_scores=True,
+                thinking=True
             )
         
         generation_time = time.time() - start_time
