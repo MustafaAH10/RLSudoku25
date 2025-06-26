@@ -1,610 +1,378 @@
-#!/usr/bin/env python3
-"""
-Qwen3 Sudoku Benchmarking Script
-===============================
-
-This script benchmarks Qwen3-1.7B performance on Sudoku puzzles
-before and after RL training. Provides comprehensive analysis.
-"""
-
-import json
 import torch
-import numpy as np
 import pandas as pd
-import time
-import re
-from pathlib import Path
-from typing import List, Dict, Tuple, Optional
-from dataclasses import dataclass
-import logging
+from transformers import AutoTokenizer, AutoModelForCausalLM
+import numpy as np
+from typing import List, Tuple
+import json
+import wandb
+from datetime import datetime
+import os
 
-# Core imports
-try:
-    from transformers import (
-        AutoTokenizer, 
-        AutoModelForCausalLM,
-        BitsAndBytesConfig
-    )
-    print("✅ Transformers imported successfully")
-except ImportError as e:
-    print(f"❌ Import error: {e}")
-    print("💡 Install: pip install transformers torch accelerate bitsandbytes")
-    exit(1)
-
-# Set up logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
-@dataclass
-class BenchmarkConfig:
-    """Configuration for benchmarking"""
-    
-    # Model settings
-    model_name: str = "Qwen/Qwen3-1.7B"
-    use_8bit: bool = True
-    enable_thinking: bool = False
-    
-    # Generation settings
-    temperature: float = 0.6
-    top_p: float = 0.95
-    top_k: int = 20
-    max_new_tokens: int = 600
-    
-    # Benchmarking settings
-    timeout_seconds: int = 30
-    max_retries: int = 2
-
-class Qwen3SudokuBenchmarker:
-    """Comprehensive benchmarking for Qwen3 on Sudoku tasks"""
-    
-    def __init__(self, config: BenchmarkConfig):
-        self.config = config
+class SudokuEvaluator:
+    def __init__(self, model_name: str = "Qwen/Qwen2.5-7B-Instruct"):
+        """Initialize the evaluator with Qwen model"""
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {self.device}")
         
-        logger.info(f"🔧 Initializing Qwen3 Benchmarker")
-        logger.info(f"   Model: {config.model_name}")
-        logger.info(f"   Device: {self.device}")
-        logger.info(f"   8-bit: {config.use_8bit}")
-        logger.info(f"   Thinking mode: {config.enable_thinking}")
+        # Load tokenizer and model
+        print("Loading tokenizer and model...")
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name,
+            torch_dtype=torch.float16,
+            device_map="auto"
+        )
         
-        # Load model and tokenizer
-        self.load_model()
+        # Add pad token if it doesn't exist
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
     
-    def load_model(self, model_path: Optional[str] = None):
-        """Load Qwen3 model and tokenizer"""
-        
-        model_to_load = model_path if model_path else self.config.model_name
-        logger.info(f"📥 Loading model: {model_to_load}")
-        
-        # Setup quantization
-        if self.config.use_8bit:
-            quantization_config = BitsAndBytesConfig(
-                load_in_8bit=True,
-                bnb_8bit_compute_dtype=torch.float16
-            )
-        else:
-            quantization_config = None
-        
-        try:
-            # Load tokenizer
-            self.tokenizer = AutoTokenizer.from_pretrained(
-                self.config.model_name if not model_path else model_path
-            )
-            if self.tokenizer.pad_token is None:
-                self.tokenizer.pad_token = self.tokenizer.eos_token
-            
-            # Load model
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_to_load,
-                quantization_config=quantization_config,
-                torch_dtype=torch.float16 if not self.config.use_8bit else None,
-                device_map="auto",
-                trust_remote_code=True
-            )
-            
-            logger.info("✅ Model loaded successfully")
-            
-        except Exception as e:
-            logger.error(f"❌ Error loading model: {e}")
-            raise
+    def string_to_grid(self, puzzle_string: str) -> List[List[int]]:
+        """Convert 81-character string to 9x9 grid"""
+        grid = []
+        for i in range(9):
+            row = []
+            for j in range(9):
+                digit = int(puzzle_string[i * 9 + j])
+                row.append(digit)
+            grid.append(row)
+        return grid
     
-    def format_sudoku_grid(self, quiz_string: str) -> str:
-        """Format Sudoku for visual display"""
-        if len(quiz_string) != 81:
-            raise ValueError(f"Invalid puzzle length: {len(quiz_string)}")
-        
-        grid_lines = []
-        for row in range(9):
-            line_chars = []
-            for col in range(9):
-                char = quiz_string[row * 9 + col]
-                line_chars.append('_' if char == '0' else char)
-            
-            line = f"{' '.join(line_chars[0:3])} │ {' '.join(line_chars[3:6])} │ {' '.join(line_chars[6:9])}"
-            grid_lines.append(line)
-            
-            if row == 2 or row == 5:
-                grid_lines.append("──────┼───────┼──────")
-        
-        return '\n'.join(grid_lines)
+    def grid_to_string(self, grid: List[List[int]]) -> str:
+        """Convert 9x9 grid back to 81-character string"""
+        return ''.join(str(grid[i][j]) for i in range(9) for j in range(9))
     
-    def find_empty_positions(self, quiz_string: str) -> List[str]:
-        """Find empty cell positions"""
-        empty_positions = []
+    def format_grid_display(self, grid: List[List[int]]) -> str:
+        """Format grid for display with proper Sudoku formatting"""
+        display = ""
+        for i, row in enumerate(grid):
+            if i % 3 == 0 and i != 0:
+                display += "------+-------+------\n"
+            row_str = ""
+            for j, cell in enumerate(row):
+                if j % 3 == 0 and j != 0:
+                    row_str += "| "
+                row_str += f"{cell if cell != 0 else '.'} "
+            display += row_str + "\n"
+        return display
+    
+    def get_empty_cells(self, puzzle_string: str) -> List[Tuple[int, int]]:
+        """Get positions of empty cells (0s) in the puzzle"""
+        empty_cells = []
         for i in range(81):
-            if quiz_string[i] == '0':
-                row, col = (i // 9) + 1, (i % 9) + 1
-                empty_positions.append(f"R{row}C{col}")
-        return empty_positions
+            if puzzle_string[i] == '0':
+                row = i // 9
+                col = i % 9
+                empty_cells.append((row, col))
+        return empty_cells
     
-    def create_benchmark_messages(self, puzzle: str, clue_count: int) -> List[Dict]:
-        """Create messages for benchmarking"""
+    def create_prompt(self, puzzle_string: str) -> str:
+        """Create a structured prompt for Sudoku solving"""
+        grid = self.string_to_grid(puzzle_string)
+        grid_display = self.format_grid_display(grid)
+        empty_cells = self.get_empty_cells(puzzle_string)
         
-        formatted_grid = self.format_sudoku_grid(puzzle)
-        empty_positions = self.find_empty_positions(puzzle)
+        # Format empty cells for display
+        empty_cells_str = ", ".join([f"({r+1},{c+1})" for r, c in empty_cells])
         
-        messages = [
-            {
-                "role": "system",
-                "content": "You are an expert Sudoku solver. Use logical reasoning to solve puzzles step by step. Always provide your final answer in the requested format."
-            },
-            {
-                "role": "user",
-                "content": f"""Solve this Sudoku puzzle with {clue_count} given clues.
+        prompt = f"""Solve this Sudoku puzzle. Analyze the puzzle and provide a complete solution.
 
-PUZZLE:
-{formatted_grid}
+Initial puzzle:
+{grid_display}
 
-EMPTY CELLS TO FILL: {', '.join(empty_positions)}
+Empty cells to fill: {empty_cells_str}
+Total empty cells: {len(empty_cells)}
 
-Rules: Each row, column, and 3×3 box must contain digits 1-9 exactly once.
+Instructions:
+1. Analyze the puzzle using standard Sudoku techniques (naked singles, hidden singles, etc.)
+2. Identify key constraints and logical deductions
+3. Provide your reasoning for the overall solving strategy
+4. Fill in all empty cells with the correct numbers
 
-IMPORTANT: Provide your solution in this EXACT format:
+After your analysis, provide the complete solution in the following format:
 SOLUTION:
-R1C1: digit
-R2C3: digit
-...
+[Provide the complete 9x9 grid with all cells filled]
 
-Think through the constraints systematically and provide ALL missing digits."""
-            }
-        ]
+Begin solving:"""
         
-        return messages
+        return prompt
     
-    def generate_solution(self, messages: List[Dict]) -> Tuple[str, float, Dict]:
-        """Generate solution with timing and metadata"""
+    def is_valid_sudoku(self, grid: List[List[int]]) -> bool:
+        """Check if a Sudoku grid is valid (no conflicts)"""
+        # Check rows
+        for row in grid:
+            seen = set()
+            for num in row:
+                if num != 0:
+                    if num in seen:
+                        return False
+                    seen.add(num)
         
-        start_time = time.time()
+        # Check columns
+        for col in range(9):
+            seen = set()
+            for row in range(9):
+                num = grid[row][col]
+                if num != 0:
+                    if num in seen:
+                        return False
+                    seen.add(num)
         
-        try:
-            # Apply chat template
-            text = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=self.config.enable_thinking
-            )
-            
-            # Tokenize
-            model_inputs = self.tokenizer([text], return_tensors="pt").to(self.device)
-            
-            # Generate with timeout protection
-            with torch.no_grad():
-                generated_ids = self.model.generate(
-                    **model_inputs,
-                    max_new_tokens=self.config.max_new_tokens,
-                    temperature=self.config.temperature,
-                    top_p=self.config.top_p,
-                    top_k=self.config.top_k,
-                    do_sample=True,
-                    pad_token_id=self.tokenizer.pad_token_id,
-                    eos_token_id=self.tokenizer.eos_token_id,
-                )
-            
-            # Extract response
-            input_length = model_inputs.input_ids.shape[1]
-            output_ids = generated_ids[0][input_length:]
-            response = self.tokenizer.decode(output_ids, skip_special_tokens=True)
-            
-            generation_time = time.time() - start_time
-            
-            # Extract metadata
-            metadata = {
-                'input_tokens': model_inputs.input_ids.shape[1],
-                'output_tokens': len(output_ids),
-                'total_tokens': model_inputs.input_ids.shape[1] + len(output_ids),
-                'generation_time': generation_time,
-                'tokens_per_second': len(output_ids) / generation_time if generation_time > 0 else 0,
-                'has_thinking': '<think>' in response and '</think>' in response
-            }
-            
-            return response, generation_time, metadata
-            
-        except Exception as e:
-            logger.error(f"❌ Generation failed: {e}")
-            return "", time.time() - start_time, {'error': str(e)}
+        # Check 3x3 boxes
+        for box_row in range(3):
+            for box_col in range(3):
+                seen = set()
+                for i in range(3):
+                    for j in range(3):
+                        num = grid[box_row * 3 + i][box_col * 3 + j]
+                        if num != 0:
+                            if num in seen:
+                                return False
+                            seen.add(num)
+        
+        return True
     
-    def parse_solution_response(self, response: str) -> Dict[str, int]:
-        """Parse model response to extract solutions"""
-        
-        solutions = {}
-        
-        # Handle thinking mode responses
-        if '<think>' in response and '</think>' in response:
-            think_end = response.rfind('</think>')
-            final_response = response[think_end + 8:] if think_end != -1 else response
+    def is_complete(self, grid: List[List[int]]) -> bool:
+        """Check if puzzle is completely filled"""
+        for row in grid:
+            for cell in row:
+                if cell == 0:
+                    return False
+        return True
+    
+    def extract_final_grid(self, response: str, original_puzzle: str) -> str:
+        """Extract the final solved grid from model response"""
+        # Look for the SOLUTION: tag
+        solution_marker = "SOLUTION:"
+        if solution_marker in response:
+            solution_part = response.split(solution_marker)[1].strip()
         else:
-            final_response = response
+            # Fallback: use the entire response
+            solution_part = response
         
-        # Look for SOLUTION: section
-        if 'SOLUTION:' in final_response.upper():
-            solution_start = final_response.upper().find('SOLUTION:') + len('SOLUTION:')
-            solution_text = final_response[solution_start:].strip()
-        else:
-            solution_text = final_response
+        # Try to extract a 9x9 grid from the solution part
+        lines = solution_part.split('\n')
         
-        # Extract R1C1: digit patterns
-        pattern = r'R(\d+)C(\d+):\s*(\d)'
-        matches = re.findall(pattern, solution_text, re.IGNORECASE)
+        # Method 1: Look for 9 consecutive lines with exactly 9 digits each
+        grid_digits = []
+        consecutive_digit_lines = 0
         
-        for match in matches:
-            row, col, digit = int(match[0]), int(match[1]), int(match[2])
-            if 1 <= row <= 9 and 1 <= col <= 9 and 1 <= digit <= 9:
-                cell_key = f"R{row}C{col}"
-                solutions[cell_key] = digit
+        for line in lines:
+            # Extract only digits from the line
+            digits_in_line = [c for c in line if c.isdigit()]
+            
+            if len(digits_in_line) == 9:
+                grid_digits.extend(digits_in_line)
+                consecutive_digit_lines += 1
+                
+                if consecutive_digit_lines == 9:
+                    # Found a complete 9x9 grid
+                    break
+            else:
+                # Reset if we don't have 9 digits in a row
+                if consecutive_digit_lines > 0 and consecutive_digit_lines < 9:
+                    grid_digits = grid_digits[:-consecutive_digit_lines*9]
+                consecutive_digit_lines = 0
         
-        return solutions
-    
-    def evaluate_solution(self, puzzle: str, solution: str, response: str) -> Dict:
-        """Comprehensive evaluation of model solution"""
+        # Method 2: If Method 1 fails, look for any 81 consecutive digits
+        if len(grid_digits) != 81:
+            all_digits = [c for c in solution_part if c.isdigit()]
+            if len(all_digits) >= 81:
+                grid_digits = all_digits[:81]
         
-        # Get expected solutions
-        expected_solutions = {}
-        for i in range(81):
-            if puzzle[i] == '0':
-                row, col = (i // 9) + 1, (i % 9) + 1
-                cell_key = f"R{row}C{col}"
-                expected_solutions[cell_key] = int(solution[i])
+        # Method 3: If still no valid solution, try to extract from formatted grid
+        if len(grid_digits) != 81:
+            grid_digits = []
+            for line in lines:
+                # Look for lines that might be sudoku rows (with separators)
+                if '|' in line or any(c.isdigit() for c in line):
+                    row_digits = [c for c in line if c.isdigit()]
+                    if len(row_digits) <= 9:  # Valid row
+                        grid_digits.extend(row_digits)
         
-        # Parse model predictions
-        predicted_solutions = self.parse_solution_response(response)
-        
-        # Calculate metrics
-        total_empty_cells = len(expected_solutions)
-        attempted_cells = len(predicted_solutions)
-        correct_cells = 0
-        incorrect_cells = 0
-        
-        # Check correctness
-        for cell_key, expected_digit in expected_solutions.items():
-            if cell_key in predicted_solutions:
-                if predicted_solutions[cell_key] == expected_digit:
-                    correct_cells += 1
-                else:
-                    incorrect_cells += 1
-        
-        # Calculate derived metrics
-        accuracy = correct_cells / total_empty_cells if total_empty_cells > 0 else 0
-        coverage = attempted_cells / total_empty_cells if total_empty_cells > 0 else 0
-        precision = correct_cells / attempted_cells if attempted_cells > 0 else 0
-        perfect_solution = (correct_cells == total_empty_cells and attempted_cells == total_empty_cells)
-        
-        # Analyze thinking quality if present
-        thinking_quality = self.analyze_thinking_quality(response)
-        
-        return {
-            'total_empty_cells': total_empty_cells,
-            'attempted_cells': attempted_cells,
-            'correct_cells': correct_cells,
-            'incorrect_cells': incorrect_cells,
-            'accuracy': accuracy,
-            'coverage': coverage,
-            'precision': precision,
-            'perfect_solution': perfect_solution,
-            'thinking_quality': thinking_quality,
-            'expected_solutions': expected_solutions,
-            'predicted_solutions': predicted_solutions
-        }
-    
-    def analyze_thinking_quality(self, response: str) -> Dict:
-        """Analyze quality of thinking content"""
-        
-        if '<think>' not in response or '</think>' not in response:
-            return {'has_thinking': False, 'score': 0.0, 'reasoning_indicators': 0}
-        
-        # Extract thinking content
-        think_start = response.find('<think>') + 7
-        think_end = response.find('</think>')
-        thinking_content = response[think_start:think_end].lower()
-        
-        # Count reasoning indicators
-        reasoning_patterns = [
-            'constraint', 'eliminate', 'possible', 'cannot', 'must be',
-            'row', 'column', 'box', 'block', 'only option',
-            'rule out', 'deduce', 'logic', 'because', 'therefore'
-        ]
-        
-        reasoning_count = sum(1 for pattern in reasoning_patterns if pattern in thinking_content)
-        thinking_length = len(thinking_content.split())
-        
-        return {
-            'has_thinking': True,
-            'score': min(reasoning_count / 8.0, 1.0),  # Normalize to 0-1
-            'reasoning_indicators': reasoning_count,
-            'thinking_length': thinking_length
-        }
-    
-    def benchmark_single_puzzle(self, sample: Dict) -> Dict:
-        """Benchmark a single puzzle"""
-        
-        logger.debug(f"🧩 Benchmarking puzzle: {sample['id']}")
-        
-        # Create messages
-        messages = self.create_benchmark_messages(sample['puzzle'], sample['clue_count'])
-        
-        # Generate solution
-        response, generation_time, metadata = self.generate_solution(messages)
-        
-        # Evaluate solution
-        evaluation = self.evaluate_solution(sample['puzzle'], sample['solution'], response)
-        
-        # Compile results
-        result = {
-            'puzzle_id': sample['id'],
-            'difficulty': sample['difficulty'],
-            'clue_count': sample['clue_count'],
-            'empty_count': sample['empty_count'],
-            'response': response,
-            'generation_time': generation_time,
-            'metadata': metadata,
-            'evaluation': evaluation,
-            'success': evaluation['perfect_solution']
-        }
-        
-        return result
-    
-    def benchmark_dataset(self, data_path: str, max_samples: Optional[int] = None) -> Dict:
-        """Benchmark entire dataset"""
-        
-        logger.info(f"📊 Starting benchmark on dataset: {data_path}")
-        
-        # Load dataset
-        try:
-            with open(data_path, 'r', encoding='utf-8') as f:
-                dataset = json.load(f)
-        except Exception as e:
-            logger.error(f"❌ Error loading dataset: {e}")
-            raise
-        
-        # Limit samples if specified
-        if max_samples and max_samples < len(dataset):
-            dataset = dataset[:max_samples]
-            logger.info(f"🔢 Limited to first {max_samples} samples")
-        
-        logger.info(f"📋 Benchmarking {len(dataset)} puzzles...")
-        
-        # Benchmark each puzzle
-        results = []
-        successful_puzzles = 0
-        
-        for i, sample in enumerate(dataset):
+        # Validate the extracted solution
+        if len(grid_digits) == 81:
             try:
-                result = self.benchmark_single_puzzle(sample)
-                results.append(result)
-                
-                if result['success']:
-                    successful_puzzles += 1
-                
-                # Progress logging
-                if (i + 1) % 10 == 0:
-                    current_success_rate = successful_puzzles / (i + 1)
-                    logger.info(f"Progress: {i+1}/{len(dataset)} | Success rate: {current_success_rate:.2%}")
-                
-            except Exception as e:
-                logger.error(f"❌ Error on puzzle {i}: {e}")
-                continue
+                # Convert to integers and back to validate
+                solution_ints = [int(d) for d in grid_digits]
+                if all(1 <= d <= 9 for d in solution_ints):
+                    return ''.join(grid_digits)
+            except ValueError:
+                pass
         
-        # Calculate aggregate statistics
-        aggregate_stats = self.calculate_aggregate_stats(results)
+        # If all methods fail, return original puzzle
+        print(f"Warning: Could not extract valid solution from response. Response length: {len(response)}")
+        return original_puzzle
+    
+    def evaluate_single_puzzle(self, puzzle: str, solution: str, clue_count: int) -> dict:
+        """Evaluate model on a single puzzle"""
+        prompt = self.create_prompt(puzzle)
         
-        logger.info(f"✅ Benchmark completed!")
-        logger.info(f"   Total puzzles: {len(results)}")
-        logger.info(f"   Perfect solutions: {successful_puzzles}")
-        logger.info(f"   Success rate: {successful_puzzles/len(results):.2%}")
+        # Generate response
+        inputs = self.tokenizer(prompt, return_tensors="pt", truncation=True, max_length=2048)
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+        
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=512,  # Reduced from 1024
+                temperature=0.3,     # Lower temperature for more focused responses
+                do_sample=True,
+                pad_token_id=self.tokenizer.eos_token_id
+            )
+        
+        response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+        response = response[len(prompt):]  # Remove the prompt from response
+        
+        # Extract the final grid from response
+        predicted_solution = self.extract_final_grid(response, puzzle)
+        
+        # Evaluate correctness
+        predicted_grid = self.string_to_grid(predicted_solution)
+        solution_grid = self.string_to_grid(solution)
+        
+        is_valid = self.is_valid_sudoku(predicted_grid)
+        is_complete = self.is_complete(predicted_grid)
+        is_correct = (predicted_solution == solution)
+        
+        # Calculate partial correctness
+        correct_cells = sum(1 for i in range(81) if predicted_solution[i] == solution[i])
+        accuracy = correct_cells / 81
         
         return {
-            'benchmark_config': {
-                'model_name': self.config.model_name,
-                'dataset_path': data_path,
-                'total_samples': len(results),
-                'timestamp': pd.Timestamp.now().isoformat()
-            },
-            'results': results,
-            'aggregate_stats': aggregate_stats
+            'puzzle': puzzle,
+            'solution': solution,
+            'predicted_solution': predicted_solution,
+            'clue_count': clue_count,
+            'is_valid': is_valid,
+            'is_complete': is_complete,
+            'is_correct': is_correct,
+            'accuracy': accuracy,
+            'empty_cells_count': puzzle.count('0'),
+            'filled_correctly': sum(1 for i in range(81) if puzzle[i] == '0' and predicted_solution[i] == solution[i]),
+            'response': response[:300]  # Reduced truncation for storage
         }
     
-    def calculate_aggregate_stats(self, results: List[Dict]) -> Dict:
-        """Calculate comprehensive aggregate statistics"""
+    def evaluate_dataset(self, test_file: str, max_samples: int = 100) -> dict:
+        """Evaluate model on a test dataset"""
+        print(f"Loading test data from {test_file}")
+        df = pd.read_csv(test_file)
         
-        if not results:
-            return {}
+        if len(df) > max_samples:
+            df = df.sample(n=max_samples, random_state=42)
         
-        # Extract metrics
-        perfect_solutions = sum(1 for r in results if r['evaluation']['perfect_solution'])
+        results = []
+        
+        for idx, row in df.iterrows():
+            print(f"Evaluating puzzle {idx + 1}/{len(df)}")
+            
+            result = self.evaluate_single_puzzle(
+                row['puzzle'], 
+                row['solution'], 
+                row['clue_count']
+            )
+            results.append(result)
+            
+            # Log progress
+            if (idx + 1) % 10 == 0:
+                correct_so_far = sum(1 for r in results if r['is_correct'])
+                print(f"Progress: {idx + 1}/{len(df)}, Correct: {correct_so_far}/{len(results)}")
+        
+        # Calculate overall metrics
         total_puzzles = len(results)
+        correct_puzzles = sum(1 for r in results if r['is_correct'])
+        valid_puzzles = sum(1 for r in results if r['is_valid'])
+        complete_puzzles = sum(1 for r in results if r['is_complete'])
+        avg_accuracy = np.mean([r['accuracy'] for r in results])
         
-        # Difficulty-based analysis
-        difficulty_stats = {}
-        for difficulty in ['expert', 'hard', 'medium', 'easy', 'beginner']:
-            diff_results = [r for r in results if r.get('difficulty') == difficulty]
-            if diff_results:
-                difficulty_stats[difficulty] = {
-                    'count': len(diff_results),
-                    'perfect_rate': sum(1 for r in diff_results if r['evaluation']['perfect_solution']) / len(diff_results),
-                    'avg_accuracy': np.mean([r['evaluation']['accuracy'] for r in diff_results]),
-                    'avg_coverage': np.mean([r['evaluation']['coverage'] for r in diff_results]),
-                    'avg_time': np.mean([r['generation_time'] for r in diff_results])
-                }
-        
-        # Overall metrics
-        accuracies = [r['evaluation']['accuracy'] for r in results]
-        coverages = [r['evaluation']['coverage'] for r in results]
-        times = [r['generation_time'] for r in results]
-        thinking_scores = [r['evaluation']['thinking_quality']['score'] for r in results]
-        
-        return {
-            'overall': {
-                'total_puzzles': total_puzzles,
-                'perfect_solutions': perfect_solutions,
-                'success_rate': perfect_solutions / total_puzzles,
-                'avg_accuracy': np.mean(accuracies),
-                'avg_coverage': np.mean(coverages),
-                'avg_generation_time': np.mean(times),
-                'avg_thinking_score': np.mean(thinking_scores),
-                'accuracy_std': np.std(accuracies),
-                'time_std': np.std(times)
-            },
-            'by_difficulty': difficulty_stats,
-            'distribution': {
-                'accuracy_quartiles': np.percentile(accuracies, [25, 50, 75]).tolist(),
-                'time_quartiles': np.percentile(times, [25, 50, 75]).tolist(),
-                'perfect_by_clue_count': self.analyze_by_clue_count(results)
-            }
-        }
-    
-    def analyze_by_clue_count(self, results: List[Dict]) -> Dict:
-        """Analyze performance by clue count"""
-        
-        clue_performance = {}
-        
+        # Group by difficulty
+        difficulty_metrics = {}
         for result in results:
             clue_count = result['clue_count']
-            if clue_count not in clue_performance:
-                clue_performance[clue_count] = {'total': 0, 'perfect': 0}
-            
-            clue_performance[clue_count]['total'] += 1
-            if result['evaluation']['perfect_solution']:
-                clue_performance[clue_count]['perfect'] += 1
+            if clue_count not in difficulty_metrics:
+                difficulty_metrics[clue_count] = []
+            difficulty_metrics[clue_count].append(result)
         
-        # Calculate success rates
-        for clue_count in clue_performance:
-            stats = clue_performance[clue_count]
-            stats['success_rate'] = stats['perfect'] / stats['total']
+        difficulty_summary = {}
+        for clue_count, group_results in difficulty_metrics.items():
+            difficulty_summary[clue_count] = {
+                'count': len(group_results),
+                'correct': sum(1 for r in group_results if r['is_correct']),
+                'valid': sum(1 for r in group_results if r['is_valid']),
+                'complete': sum(1 for r in group_results if r['is_complete']),
+                'avg_accuracy': np.mean([r['accuracy'] for r in group_results])
+            }
         
-        return clue_performance
-    
-    def save_benchmark_results(self, benchmark_data: Dict, output_path: str):
-        """Save comprehensive benchmark results"""
+        summary = {
+            'total_puzzles': total_puzzles,
+            'correct_puzzles': correct_puzzles,
+            'valid_puzzles': valid_puzzles,
+            'complete_puzzles': complete_puzzles,
+            'overall_accuracy': correct_puzzles / total_puzzles,
+            'valid_rate': valid_puzzles / total_puzzles,
+            'completion_rate': complete_puzzles / total_puzzles,
+            'avg_cell_accuracy': avg_accuracy,
+            'difficulty_breakdown': difficulty_summary
+        }
         
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        # Save complete results
-        with open(output_path, 'w', encoding='utf-8') as f:
-            json.dump(benchmark_data, f, indent=2, ensure_ascii=False)
-        
-        # Save summary CSV
-        csv_path = output_path.with_suffix('.csv')
-        summary_data = []
-        
-        for result in benchmark_data['results']:
-            summary_data.append({
-                'puzzle_id': result['puzzle_id'],
-                'difficulty': result['difficulty'],
-                'clue_count': result['clue_count'],
-                'empty_count': result['empty_count'],
-                'perfect_solution': result['evaluation']['perfect_solution'],
-                'accuracy': result['evaluation']['accuracy'],
-                'coverage': result['evaluation']['coverage'],
-                'generation_time': result['generation_time'],
-                'thinking_score': result['evaluation']['thinking_quality']['score'],
-                'tokens_generated': result['metadata'].get('output_tokens', 0)
-            })
-        
-        pd.DataFrame(summary_data).to_csv(csv_path, index=False)
-        
-        # Print summary
-        stats = benchmark_data['aggregate_stats']['overall']
-        print(f"\n📊 BENCHMARK SUMMARY")
-        print(f"=" * 50)
-        print(f"Model: {benchmark_data['benchmark_config']['model_name']}")
-        print(f"Total puzzles: {stats['total_puzzles']}")
-        print(f"Perfect solutions: {stats['perfect_solutions']}")
-        print(f"Success rate: {stats['success_rate']:.2%}")
-        print(f"Average accuracy: {stats['avg_accuracy']:.3f}")
-        print(f"Average coverage: {stats['avg_coverage']:.3f}")
-        print(f"Average time: {stats['avg_generation_time']:.2f}s")
-        print(f"Average thinking score: {stats['avg_thinking_score']:.3f}")
-        
-        logger.info(f"💾 Results saved to: {output_path}")
-        logger.info(f"📊 Summary CSV: {csv_path}")
+        return {
+            'summary': summary,
+            'detailed_results': results
+        }
 
 def main():
-    """Main benchmarking function"""
-    
-    print("🎯 Qwen3-1.7B Sudoku Benchmarking")
-    print("=" * 50)
-    
-    # Configuration
-    config = BenchmarkConfig(
-        model_name="Qwen/Qwen3-1.7B",
-        use_8bit=True,
-        enable_thinking=False,
-        max_new_tokens=600
+    # Initialize wandb
+    wandb.init(
+        project="sudoku-rl-baseline",
+        name=f"qwen-baseline-{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        config={
+            "model": "Qwen/Qwen2.5-7B-Instruct",
+            "task": "sudoku_solving",
+            "evaluation_type": "baseline"
+        }
     )
     
-    # Check for test data
-    test_data_path = "test_data/sudoku_rl_test.json"
-    if not Path(test_data_path).exists():
-        print(f"❌ Test data not found: {test_data_path}")
-        print("💡 Run the data preparation script first!")
+    # Initialize evaluator
+    evaluator = SudokuEvaluator()
+    
+    # Run evaluation
+    test_file = "data/test_set.csv"  # This will be created by the data prep script
+    
+    if not os.path.exists(test_file):
+        print(f"Test file {test_file} not found. Please run data preparation first.")
         return
     
-    try:
-        # Initialize benchmarker
-        benchmarker = Qwen3SudokuBenchmarker(config)
-        
-        # Ask which model to benchmark
-        print(f"\n🤔 Which model do you want to benchmark?")
-        print(f"1. Base Qwen3-1.7B (pre-training)")
-        print(f"2. RL-trained model (post-training)")
-        
-        choice = input("Enter choice (1 or 2): ").strip()
-        
-        if choice == "1":
-            # Benchmark base model
-            model_name = "Base Qwen3-1.7B"
-            output_file = "benchmarks/qwen3_base_benchmark.json"
-        elif choice == "2":
-            # Look for RL-trained model
-            rl_model_path = "models/qwen3_rl_final"
-            if Path(rl_model_path).exists():
-                benchmarker.load_model(rl_model_path)
-                model_name = "RL-trained Qwen3-1.7B"
-                output_file = "benchmarks/qwen3_rl_benchmark.json"
-            else:
-                print(f"❌ RL model not found: {rl_model_path}")
-                print("💡 Train the RL model first!")
-                return
-        else:
-            print("❌ Invalid choice")
-            return
-        
-        print(f"\n🚀 Starting benchmark of {model_name}...")
-        
-        # Run benchmark
-        benchmark_data = benchmarker.benchmark_dataset(test_data_path, max_samples=None)
-        
-        # Save results
-        benchmarker.save_benchmark_results(benchmark_data, output_file)
-        
-        print(f"\n🎉 Benchmark completed!")
-        print(f"📁 Results saved to: {output_file}")
-        
-    except Exception as e:
-        print(f"❌ Benchmark failed: {e}")
-        import traceback
-        traceback.print_exc()
+    print("Starting baseline evaluation...")
+    results = evaluator.evaluate_dataset(test_file, max_samples=20)  # Start with 20 samples for testing
+    
+    # Log results to wandb
+    wandb.log(results['summary'])
+    
+    # Also log some detailed metrics
+    wandb.log({
+        "avg_empty_cells": np.mean([r['empty_cells_count'] for r in results['detailed_results']]),
+        "avg_filled_correctly": np.mean([r['filled_correctly'] for r in results['detailed_results']]),
+        "empty_cell_fill_rate": np.mean([r['filled_correctly']/r['empty_cells_count'] if r['empty_cells_count'] > 0 else 0 
+                                        for r in results['detailed_results']])
+    })
+    
+    # Save detailed results
+    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    results_file = f"results/baseline_eval_{timestamp}.json"
+    os.makedirs("results", exist_ok=True)
+    
+    with open(results_file, 'w') as f:
+        json.dump(results, f, indent=2)
+    
+    print(f"\nEvaluation Results:")
+    print(f"Overall Accuracy: {results['summary']['overall_accuracy']:.3f}")
+    print(f"Valid Solutions: {results['summary']['valid_rate']:.3f}")
+    print(f"Completion Rate: {results['summary']['completion_rate']:.3f}")
+    print(f"Average Cell Accuracy: {results['summary']['avg_cell_accuracy']:.3f}")
+    
+    print(f"\nDetailed results saved to: {results_file}")
+    
+    wandb.finish()
 
 if __name__ == "__main__":
     main()

@@ -1,388 +1,390 @@
-#!/usr/bin/env python3
-"""
-Enhanced Dataset Preparation: 100 Training + 100 Test Samples
-============================================================
-
-This script creates TWO separate datasets:
-1. 100 samples for RL training (training_data/)
-2. 100 samples for benchmarking (test_data/) 
-All 200 samples are guaranteed to be unique.
-"""
-
 import pandas as pd
 import numpy as np
-import json
-import random
-from pathlib import Path
-import hashlib
 from typing import List, Dict, Tuple
+import os
+from collections import Counter
+import random
+import json
 import kagglehub
 
-class EnhancedSudokuDataPreparator:
-    """Prepare training and test datasets with guaranteed uniqueness"""
-    
-    def __init__(self, random_seed: int = 42):
-        self.random_seed = random_seed
-        random.seed(random_seed)
-        np.random.seed(random_seed)
-        self.df = None
-        self.all_used_hashes = set()  # Track ALL used puzzles across both sets
+class SudokuDataPreparator:
+    def __init__(self, output_dir: str = "data", auto_download: bool = True):
+        """
+        Initialize the data preparator
         
-    def download_kaggle_dataset(self) -> pd.DataFrame:
-        """Download and load the Kaggle Sudoku dataset"""
-        print("🔄 Downloading Kaggle Sudoku dataset...")
+        Args:
+            output_dir: Directory to save processed datasets
+            auto_download: Whether to automatically download dataset from Kaggle
+        """
+        self.output_dir = output_dir
+        self.data = None
+        self.input_file = None
         
+        # Create output directory
+        os.makedirs(output_dir, exist_ok=True)
+        
+        if auto_download:
+            self.download_dataset()
+        
+    def download_dataset(self):
+        """Download the Sudoku dataset from Kaggle"""
+        print("Downloading dataset from Kaggle...")
         try:
-            # Download dataset
+            # Download latest version
             path = kagglehub.dataset_download("informoney/4-million-sudoku-puzzles-easytohard")
-            print(f"✅ Dataset downloaded to: {path}")
+            print(f"Dataset downloaded to: {path}")
             
-            # Find and load CSV
-            csv_files = list(Path(path).glob("*.csv"))
+            # Find the CSV file in the downloaded directory
+            csv_files = [f for f in os.listdir(path) if f.endswith('.csv')]
+            
             if not csv_files:
-                raise FileNotFoundError("No CSV files found in dataset")
-                
-            csv_path = csv_files[0]
-            print(f"📁 Loading CSV: {csv_path}")
+                raise FileNotFoundError("No CSV files found in downloaded dataset")
             
-            # Load dataset
-            self.df = pd.read_csv(csv_path)
-            print(f"✅ Loaded {len(self.df):,} puzzles")
-            
-            # Add unique identifiers
-            self.df['puzzle_hash'] = self.df['quizzes'].apply(
-                lambda x: hashlib.md5(x.encode()).hexdigest()[:12]
-            )
-            
-            print(f"📊 Clue count distribution:")
-            clue_dist = self.df['clue_numbers'].value_counts().sort_index()
-            print(f"   Min clues: {clue_dist.index.min()}")
-            print(f"   Max clues: {clue_dist.index.max()}")
-            print(f"   Most common: {clue_dist.index[clue_dist.argmax()]} clues ({clue_dist.max():,} puzzles)")
-            
-            return self.df
+            # Use the first CSV file found (should be the main dataset)
+            self.input_file = os.path.join(path, csv_files[0])
+            print(f"Using dataset file: {self.input_file}")
             
         except Exception as e:
-            print(f"❌ Error loading dataset: {e}")
-            return None
+            print(f"Error downloading dataset: {e}")
+            print("Please manually download the dataset and update the INPUT_FILE variable")
+            raise
+        
+    def load_and_process_data(self):
+        """Load the original dataset and add unique IDs"""
+        print("Loading original dataset...")
+        
+        # Load the data - assuming column names are 'quizzes', 'solutions', 'clue_count'
+        # Adjust column names based on actual CSV structure
+        self.data = pd.read_csv(self.input_file)
+        
+        # Check column names and rename if necessary
+        print(f"Original columns: {list(self.data.columns)}")
+        
+        # Rename columns to standard format if needed
+        column_mapping = {}
+        for col in self.data.columns:
+            if 'quiz' in col.lower() or 'puzzle' in col.lower():
+                column_mapping[col] = 'puzzle'
+            elif 'solution' in col.lower():
+                column_mapping[col] = 'solution'
+            elif 'clue' in col.lower() or 'hint' in col.lower():
+                column_mapping[col] = 'clue_count'
+        
+        if column_mapping:
+            self.data = self.data.rename(columns=column_mapping)
+            print(f"Renamed columns: {column_mapping}")
+        
+        # Add unique IDs
+        self.data['id'] = range(len(self.data))
+        
+        # Remove any duplicates based on puzzle
+        print(f"Original dataset size: {len(self.data)}")
+        self.data = self.data.drop_duplicates(subset=['puzzle'], keep='first')
+        print(f"After removing duplicates: {len(self.data)}")
+        
+        # Validate data format
+        self.validate_data()
+        
+        print(f"Data loaded successfully. Shape: {self.data.shape}")
+        print(f"Clue count distribution:")
+        print(self.data['clue_count'].value_counts().sort_index())
+        
+    def validate_data(self):
+        """Validate that the data is in correct format"""
+        print("Validating data format...")
+        
+        # Check that puzzles and solutions are 81 characters
+        invalid_puzzles = self.data[self.data['puzzle'].str.len() != 81]
+        invalid_solutions = self.data[self.data['solution'].str.len() != 81]
+        
+        if len(invalid_puzzles) > 0:
+            print(f"Warning: {len(invalid_puzzles)} puzzles are not 81 characters long")
+            self.data = self.data[self.data['puzzle'].str.len() == 81]
+        
+        if len(invalid_solutions) > 0:
+            print(f"Warning: {len(invalid_solutions)} solutions are not 81 characters long")
+            self.data = self.data[self.data['solution'].str.len() == 81]
+        
+        # Check that puzzles contain only digits 0-9
+        invalid_chars_puzzle = self.data[~self.data['puzzle'].str.match(r'^[0-9]{81}$')]
+        invalid_chars_solution = self.data[~self.data['solution'].str.match(r'^[1-9]{81}$')]
+        
+        if len(invalid_chars_puzzle) > 0:
+            print(f"Warning: {len(invalid_chars_puzzle)} puzzles contain invalid characters")
+            self.data = self.data[self.data['puzzle'].str.match(r'^[0-9]{81}$')]
+        
+        if len(invalid_chars_solution) > 0:
+            print(f"Warning: {len(invalid_chars_solution)} solutions contain invalid characters")
+            self.data = self.data[self.data['solution'].str.match(r'^[1-9]{81}$')]
+        
+        print(f"Data validation complete. Final dataset size: {len(self.data)}")
     
-    def format_sudoku_for_qwen3(self, quiz_string: str) -> str:
-        """Format Sudoku puzzle optimized for Qwen3"""
-        if len(quiz_string) != 81:
-            raise ValueError(f"Invalid puzzle length: {len(quiz_string)}")
+    def get_difficulty_distribution(self, total_samples: int, min_clues: int = 17, max_clues: int = 80) -> Dict[int, int]:
+        """
+        Calculate how many samples to take from each difficulty level
         
-        # Convert to visually clear grid with Unicode box drawing
-        grid_lines = []
-        for row in range(9):
-            line_chars = []
-            for col in range(9):
-                char = quiz_string[row * 9 + col]
-                line_chars.append('_' if char == '0' else char)
-            
-            # Create visually appealing 3x3 blocks
-            line = f"{' '.join(line_chars[0:3])} │ {' '.join(line_chars[3:6])} │ {' '.join(line_chars[6:9])}"
-            grid_lines.append(line)
-            
-            # Add horizontal separators after rows 2 and 5
-            if row == 2 or row == 5:
-                grid_lines.append("──────┼───────┼──────")
+        Args:
+            total_samples: Total number of samples needed
+            min_clues: Minimum number of clues (hardest)
+            max_clues: Maximum number of clues (easiest)
         
-        return '\n'.join(grid_lines)
+        Returns:
+            Dictionary mapping clue_count to number of samples
+        """
+        # Get available clue counts in our data
+        available_clues = sorted(self.data['clue_count'].unique())
+        available_clues = [c for c in available_clues if min_clues <= c <= max_clues]
+        
+        if not available_clues:
+            raise ValueError(f"No puzzles found with clue counts between {min_clues} and {max_clues}")
+        
+        print(f"Available clue counts: {available_clues}")
+        
+        # Create a weighted distribution that gives more samples to middle difficulties
+        # and ensures harder puzzles (fewer clues) are well represented
+        distribution = {}
+        
+        # Inverse weighting: fewer clues = higher weight
+        weights = {}
+        for clue_count in available_clues:
+            # Give higher weight to harder puzzles (fewer clues)
+            weights[clue_count] = 1.0 / (clue_count - min_clues + 1)
+        
+        # Normalize weights
+        total_weight = sum(weights.values())
+        for clue_count in available_clues:
+            weights[clue_count] /= total_weight
+        
+        # Calculate samples per difficulty
+        remaining_samples = total_samples
+        for i, clue_count in enumerate(available_clues):
+            if i == len(available_clues) - 1:  # Last one gets remaining samples
+                distribution[clue_count] = remaining_samples
+            else:
+                samples = max(1, int(total_samples * weights[clue_count]))
+                distribution[clue_count] = min(samples, remaining_samples)
+                remaining_samples -= samples
+        
+        # Ensure we don't exceed available puzzles for each difficulty
+        for clue_count in distribution:
+            available_count = len(self.data[self.data['clue_count'] == clue_count])
+            if distribution[clue_count] > available_count:
+                print(f"Warning: Requested {distribution[clue_count]} puzzles with {clue_count} clues, "
+                      f"but only {available_count} available")
+                distribution[clue_count] = available_count
+        
+        return distribution
     
-    def find_empty_positions(self, quiz_string: str) -> List[str]:
-        """Find empty cell positions in (R,C) format"""
-        empty_positions = []
-        for i in range(81):
-            if quiz_string[i] == '0':
-                row = (i // 9) + 1  # 1-indexed
-                col = (i % 9) + 1   # 1-indexed
-                empty_positions.append(f"R{row}C{col}")
-        return empty_positions
-    
-    def create_qwen3_messages(self, puzzle: str, clue_count: int) -> List[Dict]:
-        """Create Qwen3-optimized message format"""
+    def sample_by_difficulty(self, distribution: Dict[int, int], exclude_ids: set = None) -> pd.DataFrame:
+        """
+        Sample puzzles according to difficulty distribution
         
-        formatted_grid = self.format_sudoku_for_qwen3(puzzle)
-        empty_positions = self.find_empty_positions(puzzle)
+        Args:
+            distribution: Dictionary mapping clue_count to number of samples
+            exclude_ids: Set of IDs to exclude from sampling
         
-        messages = [
-            {
-                "role": "system",
-                "content": "You are an expert Sudoku solver. Use step-by-step logical reasoning to solve puzzles systematically. Think through constraints carefully."
-            },
-            {
-                "role": "user",
-                "content": f"""Solve this Sudoku puzzle with {clue_count} given clues.
-
-PUZZLE:
-{formatted_grid}
-
-EMPTY CELLS TO FILL: {', '.join(empty_positions)}
-
-Rules: Each row, column, and 3×3 box must contain digits 1-9 exactly once.
-
-Provide your solution in this EXACT format:
-SOLUTION:
-R1C1: digit
-R2C3: digit
-...
-
-Think step by step about constraints and logical deductions."""
-            }
-        ]
+        Returns:
+            DataFrame with sampled puzzles
+        """
+        if exclude_ids is None:
+            exclude_ids = set()
         
-        return messages
-    
-    def create_target_response(self, puzzle: str, solution: str) -> str:
-        """Create the target response showing correct solutions"""
+        sampled_data = []
         
-        solution_lines = []
-        
-        for i in range(81):
-            if puzzle[i] == '0':
-                row = (i // 9) + 1
-                col = (i % 9) + 1
-                digit = solution[i]
-                solution_lines.append(f"R{row}C{col}: {digit}")
-        
-        return '\n'.join(solution_lines)
-    
-    def get_stratified_sample(self, total_samples: int, dataset_name: str) -> List[Dict]:
-        """Get stratified sample for either training or test set"""
-        
-        if self.df is None:
-            print("❌ Dataset not loaded. Loading now...")
-            self.download_kaggle_dataset()
+        for clue_count, num_samples in distribution.items():
+            if num_samples <= 0:
+                continue
+                
+            # Filter data for this difficulty level, excluding already used IDs
+            difficulty_data = self.data[
+                (self.data['clue_count'] == clue_count) & 
+                (~self.data['id'].isin(exclude_ids))
+            ]
             
-        if self.df is None:
-            raise ValueError("Could not load dataset")
-        
-        # Define difficulty distribution (same for both sets)
-        difficulty_targets = {
-            'expert': (17, 25, int(total_samples * 0.10)),    # 10% expert
-            'hard': (26, 35, int(total_samples * 0.20)),      # 20% hard
-            'medium': (36, 50, int(total_samples * 0.30)),    # 30% medium
-            'easy': (51, 65, int(total_samples * 0.25)),      # 25% easy
-            'beginner': (66, 80, int(total_samples * 0.15))   # 15% beginner
-        }
-        
-        # Adjust for rounding
-        total_allocated = sum(count for _, _, count in difficulty_targets.values())
-        if total_allocated < total_samples:
-            difficulty_targets['medium'] = (
-                difficulty_targets['medium'][0],
-                difficulty_targets['medium'][1], 
-                difficulty_targets['medium'][2] + (total_samples - total_allocated)
-            )
-        
-        all_samples = []
-        
-        for difficulty, (min_clues, max_clues, target_count) in difficulty_targets.items():
-            print(f"🎯 Sampling {target_count} {difficulty} puzzles for {dataset_name} ({min_clues}-{max_clues} clues)...")
-            
-            # Filter by clue range
-            mask = (self.df['clue_numbers'] >= min_clues) & (self.df['clue_numbers'] <= max_clues)
-            difficulty_df = self.df[mask]
-            
-            # Remove already used puzzles across ALL datasets
-            difficulty_df = difficulty_df[~difficulty_df['puzzle_hash'].isin(self.all_used_hashes)]
-            
-            if len(difficulty_df) < target_count:
-                print(f"⚠️  Only {len(difficulty_df)} available, need {target_count}")
-                target_count = len(difficulty_df)
+            if len(difficulty_data) < num_samples:
+                print(f"Warning: Only {len(difficulty_data)} puzzles available for "
+                      f"{clue_count} clues, requested {num_samples}")
+                num_samples = len(difficulty_data)
             
             # Sample without replacement
-            sampled = difficulty_df.sample(n=target_count, random_state=self.random_seed + len(all_samples))
+            sampled = difficulty_data.sample(n=num_samples, random_state=42)
+            sampled_data.append(sampled)
             
-            # Process samples
-            for idx, row in sampled.iterrows():
-                sample = {
-                    'id': f"{dataset_name}_{difficulty}_{len(all_samples)+1:03d}",
-                    'puzzle_hash': row['puzzle_hash'],
-                    'difficulty': difficulty,
-                    'puzzle': row['quizzes'],
-                    'solution': row['solutions'],
-                    'clue_count': int(row['clue_numbers']),
-                    'empty_count': 81 - int(row['clue_numbers']),
-                    'messages': self.create_qwen3_messages(row['quizzes'], int(row['clue_numbers'])),
-                    'target_response': self.create_target_response(row['quizzes'], row['solutions']),
-                    'formatted_grid': self.format_sudoku_for_qwen3(row['quizzes'])
-                }
-                
-                all_samples.append(sample)
-                self.all_used_hashes.add(row['puzzle_hash'])  # Track globally
-            
-            print(f"✅ Added {len(sampled)} {difficulty} samples to {dataset_name}")
+            # Add sampled IDs to exclude set
+            exclude_ids.update(sampled['id'].tolist())
         
-        # Shuffle final samples
-        random.shuffle(all_samples)
-        print(f"✅ Created {len(all_samples)} total samples for {dataset_name}")
+        if not sampled_data:
+            return pd.DataFrame()
         
-        return all_samples
+        result = pd.concat(sampled_data, ignore_index=True)
+        return result.sample(frac=1, random_state=42).reset_index(drop=True)  # Shuffle
     
-    def create_both_datasets(self) -> Tuple[List[Dict], List[Dict]]:
-        """Create both training and test datasets ensuring uniqueness"""
+    def create_datasets(self):
+        """Create all required datasets"""
+        print("Creating datasets...")
         
-        print("🎯 Creating training and test datasets...")
-        print("=" * 60)
+        used_ids = set()
+        datasets = {}
         
-        # Create training dataset first
-        print("\n📚 CREATING TRAINING DATASET (100 samples)")
-        train_samples = self.get_stratified_sample(100, "train")
+        # 1. CoT Training Set (1000 samples with varying difficulty)
+        print("Creating CoT training set (1000 samples)...")
+        cot_distribution = self.get_difficulty_distribution(1000)
+        print(f"CoT training distribution: {cot_distribution}")
         
-        print(f"\n📊 CREATING TEST DATASET (100 samples)")
-        test_samples = self.get_stratified_sample(100, "test")
+        cot_train = self.sample_by_difficulty(cot_distribution, used_ids)
+        used_ids.update(cot_train['id'].tolist())
+        datasets['cot_train'] = cot_train
         
-        # Verify no overlap
-        train_hashes = {s['puzzle_hash'] for s in train_samples}
-        test_hashes = {s['puzzle_hash'] for s in test_samples}
-        overlap = train_hashes & test_hashes
+        # 2. RL Training Set (5000 samples)
+        print("Creating RL training set (5000 samples)...")
+        rl_distribution = self.get_difficulty_distribution(5000)
+        print(f"RL training distribution: {rl_distribution}")
         
-        if overlap:
-            raise ValueError(f"❌ Found {len(overlap)} overlapping puzzles!")
+        rl_train = self.sample_by_difficulty(rl_distribution, used_ids)
+        used_ids.update(rl_train['id'].tolist())
+        datasets['rl_train'] = rl_train
         
-        print(f"\n✅ UNIQUENESS VERIFIED:")
-        print(f"   Training puzzles: {len(train_samples)}")
-        print(f"   Test puzzles: {len(test_samples)}")
-        print(f"   Total unique puzzles: {len(train_hashes | test_hashes)}")
-        print(f"   No overlaps: ✅")
+        # 3. Validation Set (1000 samples)
+        print("Creating validation set (1000 samples)...")
+        val_distribution = self.get_difficulty_distribution(1000)
+        print(f"Validation distribution: {val_distribution}")
         
-        return train_samples, test_samples
+        val_set = self.sample_by_difficulty(val_distribution, used_ids)
+        used_ids.update(val_set['id'].tolist())
+        datasets['val_set'] = val_set
+        
+        # 4. Test Set (1000 samples)
+        print("Creating test set (1000 samples)...")
+        test_distribution = self.get_difficulty_distribution(1000)
+        print(f"Test distribution: {test_distribution}")
+        
+        test_set = self.sample_by_difficulty(test_distribution, used_ids)
+        used_ids.update(test_set['id'].tolist())
+        datasets['test_set'] = test_set
+        
+        return datasets
     
-    def save_datasets(self, train_samples: List[Dict], test_samples: List[Dict]):
-        """Save both datasets to separate directories"""
+    def save_datasets(self, datasets: Dict[str, pd.DataFrame]):
+        """Save all datasets to CSV files"""
+        print("Saving datasets...")
         
-        # Create directories
-        train_dir = Path("training_data")
-        test_dir = Path("test_data")
-        train_dir.mkdir(exist_ok=True)
-        test_dir.mkdir(exist_ok=True)
-        
-        # Save training dataset
-        print(f"\n💾 Saving training dataset...")
-        train_path = train_dir / "sudoku_rl_train.json"
-        with open(train_path, 'w', encoding='utf-8') as f:
-            json.dump(train_samples, f, indent=2, ensure_ascii=False)
-        
-        train_csv_path = train_dir / "sudoku_rl_train.csv"
-        train_df_data = [{
-            'id': s['id'], 'difficulty': s['difficulty'], 'clue_count': s['clue_count'],
-            'puzzle': s['puzzle'], 'solution': s['solution']
-        } for s in train_samples]
-        pd.DataFrame(train_df_data).to_csv(train_csv_path, index=False)
-        
-        # Save test dataset
-        print(f"💾 Saving test dataset...")
-        test_path = test_dir / "sudoku_rl_test.json"
-        with open(test_path, 'w', encoding='utf-8') as f:
-            json.dump(test_samples, f, indent=2, ensure_ascii=False)
-        
-        test_csv_path = test_dir / "sudoku_rl_test.csv"
-        test_df_data = [{
-            'id': s['id'], 'difficulty': s['difficulty'], 'clue_count': s['clue_count'],
-            'puzzle': s['puzzle'], 'solution': s['solution']
-        } for s in test_samples]
-        pd.DataFrame(test_df_data).to_csv(test_csv_path, index=False)
-        
-        # Save statistics
-        self.save_dataset_stats(train_samples, test_samples)
-        
-        print(f"\n✅ DATASETS SAVED:")
-        print(f"   Training: {train_path}")
-        print(f"   Training CSV: {train_csv_path}")
-        print(f"   Test: {test_path}")
-        print(f"   Test CSV: {test_csv_path}")
-    
-    def save_dataset_stats(self, train_samples: List[Dict], test_samples: List[Dict]):
-        """Save comprehensive statistics for both datasets"""
-        
-        def get_stats(samples, name):
-            return {
-                'name': name,
-                'total_samples': len(samples),
-                'difficulty_distribution': {
-                    d: len([s for s in samples if s['difficulty'] == d])
-                    for d in ['expert', 'hard', 'medium', 'easy', 'beginner']
-                },
-                'clue_stats': {
-                    'min': min(s['clue_count'] for s in samples),
-                    'max': max(s['clue_count'] for s in samples),
-                    'mean': sum(s['clue_count'] for s in samples) / len(samples),
-                },
-                'sample_puzzles': [
-                    {
-                        'id': s['id'],
-                        'difficulty': s['difficulty'], 
-                        'clue_count': s['clue_count'],
-                        'grid_preview': s['formatted_grid'][:100] + "..."
-                    }
-                    for s in samples[:2]  # First 2 samples as examples
-                ]
-            }
-        
-        stats = {
-            'creation_date': pd.Timestamp.now().isoformat(),
-            'total_unique_puzzles': len(train_samples) + len(test_samples),
-            'training_set': get_stats(train_samples, 'training'),
-            'test_set': get_stats(test_samples, 'test'),
-            'uniqueness_verified': True
+        file_mapping = {
+            'cot_train': 'cot_training_set.csv',
+            'rl_train': 'rl_training_set.csv',
+            'val_set': 'validation_set.csv',
+            'test_set': 'test_set.csv'
         }
         
-        # Save to both directories
-        for directory in [Path("training_data"), Path("test_data")]:
-            stats_path = directory / "dataset_statistics.json"
-            with open(stats_path, 'w') as f:
-                json.dump(stats, f, indent=2)
+        dataset_info = {}
         
-        print(f"📈 Statistics saved to both directories")
+        for dataset_name, df in datasets.items():
+            filename = file_mapping[dataset_name]
+            filepath = os.path.join(self.output_dir, filename)
+            
+            df.to_csv(filepath, index=False)
+            
+            # Collect statistics
+            stats = {
+                'total_samples': len(df),
+                'difficulty_distribution': df['clue_count'].value_counts().to_dict(),
+                'clue_range': {
+                    'min': int(df['clue_count'].min()),
+                    'max': int(df['clue_count'].max()),
+                    'mean': float(df['clue_count'].mean())
+                }
+            }
+            
+            dataset_info[dataset_name] = {
+                'filename': filename,
+                'filepath': filepath,
+                'stats': stats
+            }
+            
+            print(f"Saved {dataset_name}: {filepath} ({len(df)} samples)")
+        
+        # Save dataset information
+        info_file = os.path.join(self.output_dir, 'dataset_info.json')
+        with open(info_file, 'w') as f:
+            json.dump(dataset_info, f, indent=2)
+        
+        print(f"Dataset information saved to: {info_file}")
+        return dataset_info
+    
+    def verify_uniqueness(self, datasets: Dict[str, pd.DataFrame]):
+        """Verify that all datasets contain unique puzzles"""
+        print("Verifying dataset uniqueness...")
+        
+        all_ids = set()
+        overlaps = {}
+        
+        for name, df in datasets.items():
+            current_ids = set(df['id'].tolist())
+            
+            # Check for overlaps with previously processed datasets
+            overlap_count = len(current_ids.intersection(all_ids))
+            if overlap_count > 0:
+                overlaps[name] = overlap_count
+                print(f"ERROR: {name} has {overlap_count} overlapping puzzles!")
+            else:
+                print(f"✓ {name} has no overlaps ({len(current_ids)} unique puzzles)")
+            
+            all_ids.update(current_ids)
+        
+        if not overlaps:
+            print("✓ All datasets are unique!")
+        else:
+            raise ValueError(f"Dataset overlaps detected: {overlaps}")
+        
+        return len(overlaps) == 0
+    
+    def print_summary(self, datasets: Dict[str, pd.DataFrame]):
+        """Print a summary of created datasets"""
+        print("\n" + "="*60)
+        print("DATASET CREATION SUMMARY")
+        print("="*60)
+        
+        total_samples = sum(len(df) for df in datasets.values())
+        print(f"Total samples created: {total_samples}")
+        print()
+        
+        for name, df in datasets.items():
+            print(f"{name.upper()}:")
+            print(f"  Samples: {len(df)}")
+            print(f"  Clue range: {df['clue_count'].min()} - {df['clue_count'].max()}")
+            print(f"  Mean clues: {df['clue_count'].mean():.1f}")
+            
+            # Show difficulty distribution
+            dist = df['clue_count'].value_counts().sort_index()
+            print("  Difficulty distribution:")
+            for clues, count in dist.items():
+                difficulty = "Very Hard" if clues < 25 else "Hard" if clues < 35 else "Medium" if clues < 50 else "Easy"
+                print(f"    {clues} clues: {count} puzzles ({difficulty})")
+            print()
 
 def main():
-    """Main execution function"""
+    # Configuration
+    OUTPUT_DIR = "data"
     
-    print("🎲 Enhanced Sudoku Dataset Preparation")
-    print("=" * 60)
-    print("Creating 200 unique puzzles:")
-    print("• 100 for RL training (training_data/)")
-    print("• 100 for benchmarking (test_data/)")
-    print("=" * 60)
+    # Initialize data preparator (will auto-download dataset)
+    preparator = SudokuDataPreparator(OUTPUT_DIR, auto_download=True)
     
-    # Initialize preparator
-    preparator = EnhancedSudokuDataPreparator(random_seed=42)
+    # Load and process data
+    preparator.load_and_process_data()
     
-    try:
-        # Download dataset
-        preparator.download_kaggle_dataset()
-        
-        # Create both datasets
-        train_samples, test_samples = preparator.create_both_datasets()
-        
-        # Save datasets
-        preparator.save_datasets(train_samples, test_samples)
-        
-        print(f"\n🎉 SUCCESS!")
-        print(f"✅ Created 200 unique Sudoku puzzles")
-        print(f"📁 Training data: training_data/sudoku_rl_train.json")
-        print(f"📁 Test data: test_data/sudoku_rl_test.json")
-        print(f"\n🚀 Next steps:")
-        print(f"1. Run benchmarking: python benchmark_qwen3.py")
-        print(f"2. Run RL training: python qwen3_rl_trainer.py")
-        print(f"3. Run post-RL benchmarking to compare results")
-        
-        # Show samples from both sets
-        print(f"\n📋 Sample from training set:")
-        train_sample = train_samples[0]
-        print(f"   ID: {train_sample['id']}")
-        print(f"   Difficulty: {train_sample['difficulty']} ({train_sample['clue_count']} clues)")
-        
-        print(f"\n📋 Sample from test set:")
-        test_sample = test_samples[0]
-        print(f"   ID: {test_sample['id']}")
-        print(f"   Difficulty: {test_sample['difficulty']} ({test_sample['clue_count']} clues)")
-        
-    except Exception as e:
-        print(f"❌ Error: {e}")
-        print("💡 Make sure you have internet connection and required packages:")
-        print("   pip install kagglehub pandas numpy")
+    # Create datasets
+    datasets = preparator.create_datasets()
+    
+    # Verify uniqueness
+    preparator.verify_uniqueness(datasets)
+    
+    # Save datasets
+    dataset_info = preparator.save_datasets(datasets)
+    
+    # Print summary
+    preparator.print_summary(datasets)
+    
+    print("Data preparation complete!")
+    print(f"All files saved in '{OUTPUT_DIR}' directory")
 
 if __name__ == "__main__":
     main()
