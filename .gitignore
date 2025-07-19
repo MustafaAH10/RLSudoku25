@@ -37,3 +37,6 @@ Thumbs.db
 sudoku/bin
 /sudoku
 localtest/wandb/
+
+# Large data files
+remote/shared_data/raw/sudoku_puzzles.csv
