@@ -1,0 +1,11 @@
+{
+  "model_name": "microsoft/DialoGPT-medium",
+  "base_model_path": "models/base_model",
+  "experiment_1_final_path": "models/experiment_1_final_model",
+  "experiment_2_final_path": "models/experiment_2_final_model",
+  "experiment_3_final_path": "models/experiment_3_final_model",
+  "test_success": false,
+  "generation_time": 349.9576647281647,
+  "generated_response": "",
+  "timestamp": 1752931227.2412095
+}

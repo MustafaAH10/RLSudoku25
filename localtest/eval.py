@@ -1,3 +1,17 @@
+"""
+Sudoku Evaluation Script
+
+Before running this script, make sure you have:
+1. Installed required packages: pip install torch transformers wandb huggingface_hub
+2. Authenticated with Hugging Face: huggingface-cli login
+3. Set up wandb account and login
+
+If you get authentication errors, run:
+huggingface-cli login
+
+And enter your Hugging Face token from: https://huggingface.co/settings/tokens
+"""
+
 import torch
 import pandas as pd
 from transformers import AutoTokenizer, AutoModelForCausalLM
@@ -9,19 +23,56 @@ from datetime import datetime
 import os
 
 class SudokuEvaluator:
-    def __init__(self, model_name: str = "Qwen/Qwen2.5-7B-Instruct"):
+    def __init__(self, model_name: str = "Qwen/Qwen2.5-8B-Instruct"):
         """Initialize the evaluator with Qwen model"""
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {self.device}")
         
         # Load tokenizer and model
         print("Loading tokenizer and model...")
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_pretrained(
-            model_name,
-            torch_dtype=torch.float16,
-            device_map="auto"
-        )
+        
+        # Try different model names if the main one fails
+        model_options = [
+            "Qwen/Qwen2.5-8B-Instruct",
+            "Qwen/Qwen2.5-7B-Instruct", 
+            "Qwen/Qwen2-7B-Instruct",
+            "microsoft/DialoGPT-medium",  # Fallback option
+            "gpt2-medium"  # Another fallback
+        ]
+        
+        model_loaded = False
+        for model_option in model_options:
+            try:
+                print(f"Trying to load model: {model_option}")
+                self.tokenizer = AutoTokenizer.from_pretrained(model_option)
+                
+                # Use CPU if CUDA is not available, and appropriate dtype
+                if self.device.type == "cpu":
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        model_option,
+                        torch_dtype=torch.float32,  # Use float32 for CPU
+                    )
+                else:
+                    self.model = AutoModelForCausalLM.from_pretrained(
+                        model_option,
+                        torch_dtype=torch.float16,
+                        device_map="auto"
+                    )
+                
+                print(f"Successfully loaded model: {model_option}")
+                model_loaded = True
+                break
+                
+            except Exception as e:
+                print(f"Failed to load {model_option}: {str(e)}")
+                continue
+        
+        if not model_loaded:
+            raise RuntimeError("Could not load any model. Please check your internet connection and Hugging Face authentication.")
+        
+        # Move model to device if using CPU
+        if self.device.type == "cpu":
+            self.model = self.model.to(self.device)
         
         # Add pad token if it doesn't exist
         if self.tokenizer.pad_token is None:
@@ -56,14 +107,14 @@ class SudokuEvaluator:
             display += row_str + "\n"
         return display
     
-    def get_empty_cells(self, puzzle_string: str) -> List[Tuple[int, int]]:
-        """Get positions of empty cells (0s) in the puzzle"""
+    def get_empty_cells(self, puzzle_string: str) -> List[str]:
+        """Get positions of empty cells (0s) in the puzzle in rXcY format"""
         empty_cells = []
         for i in range(81):
             if puzzle_string[i] == '0':
-                row = i // 9
-                col = i % 9
-                empty_cells.append((row, col))
+                row = i // 9 + 1  # 1-indexed
+                col = i % 9 + 1   # 1-indexed
+                empty_cells.append(f"r{row}c{col}")
         return empty_cells
     
     def create_prompt(self, puzzle_string: str) -> str:
@@ -73,9 +124,9 @@ class SudokuEvaluator:
         empty_cells = self.get_empty_cells(puzzle_string)
         
         # Format empty cells for display
-        empty_cells_str = ", ".join([f"({r+1},{c+1})" for r, c in empty_cells])
+        empty_cells_str = ", ".join(empty_cells)
         
-        prompt = f"""Solve this Sudoku puzzle. Analyze the puzzle and provide a complete solution.
+        prompt = f"""Solve this Sudoku puzzle. Analyze the puzzle and provide values for all empty cells.
 
 Initial puzzle:
 {grid_display}
@@ -89,9 +140,13 @@ Instructions:
 3. Provide your reasoning for the overall solving strategy
 4. Fill in all empty cells with the correct numbers
 
-After your analysis, provide the complete solution in the following format:
+After your analysis, provide the solution for each empty cell in the following format:
 SOLUTION:
-[Provide the complete 9x9 grid with all cells filled]
+r1c3: 5
+r2c7: 8
+r3c1: 4
+...
+(continue for all empty cells)
 
 Begin solving:"""
         
@@ -141,7 +196,10 @@ Begin solving:"""
         return True
     
     def extract_final_grid(self, response: str, original_puzzle: str) -> str:
-        """Extract the final solved grid from model response"""
+        """Extract the final solved grid from model response using rXcY: digit format"""
+        # Start with the original puzzle
+        result_grid = list(original_puzzle)
+        
         # Look for the SOLUTION: tag
         solution_marker = "SOLUTION:"
         if solution_marker in response:
@@ -150,59 +208,65 @@ Begin solving:"""
             # Fallback: use the entire response
             solution_part = response
         
-        # Try to extract a 9x9 grid from the solution part
-        lines = solution_part.split('\n')
+        # Parse rXcY: digit format
+        import re
+        pattern = r'r(\d+)c(\d+):\s*(\d+)'
+        matches = re.findall(pattern, solution_part)
         
-        # Method 1: Look for 9 consecutive lines with exactly 9 digits each
-        grid_digits = []
-        consecutive_digit_lines = 0
-        
-        for line in lines:
-            # Extract only digits from the line
-            digits_in_line = [c for c in line if c.isdigit()]
-            
-            if len(digits_in_line) == 9:
-                grid_digits.extend(digits_in_line)
-                consecutive_digit_lines += 1
-                
-                if consecutive_digit_lines == 9:
-                    # Found a complete 9x9 grid
-                    break
-            else:
-                # Reset if we don't have 9 digits in a row
-                if consecutive_digit_lines > 0 and consecutive_digit_lines < 9:
-                    grid_digits = grid_digits[:-consecutive_digit_lines*9]
-                consecutive_digit_lines = 0
-        
-        # Method 2: If Method 1 fails, look for any 81 consecutive digits
-        if len(grid_digits) != 81:
-            all_digits = [c for c in solution_part if c.isdigit()]
-            if len(all_digits) >= 81:
-                grid_digits = all_digits[:81]
-        
-        # Method 3: If still no valid solution, try to extract from formatted grid
-        if len(grid_digits) != 81:
-            grid_digits = []
-            for line in lines:
-                # Look for lines that might be sudoku rows (with separators)
-                if '|' in line or any(c.isdigit() for c in line):
-                    row_digits = [c for c in line if c.isdigit()]
-                    if len(row_digits) <= 9:  # Valid row
-                        grid_digits.extend(row_digits)
-        
-        # Validate the extracted solution
-        if len(grid_digits) == 81:
+        filled_count = 0
+        for match in matches:
             try:
-                # Convert to integers and back to validate
-                solution_ints = [int(d) for d in grid_digits]
-                if all(1 <= d <= 9 for d in solution_ints):
-                    return ''.join(grid_digits)
-            except ValueError:
-                pass
+                row = int(match[0]) - 1  # Convert to 0-indexed
+                col = int(match[1]) - 1  # Convert to 0-indexed
+                digit = match[2]
+                
+                # Validate bounds
+                if 0 <= row < 9 and 0 <= col < 9 and digit.isdigit() and '1' <= digit <= '9':
+                    position = row * 9 + col
+                    # Only fill if it was originally empty
+                    if original_puzzle[position] == '0':
+                        result_grid[position] = digit
+                        filled_count += 1
+            except (ValueError, IndexError):
+                continue
         
-        # If all methods fail, return original puzzle
-        print(f"Warning: Could not extract valid solution from response. Response length: {len(response)}")
-        return original_puzzle
+        print(f"Debug: Filled {filled_count} cells from rXcY format")
+        
+        # If we didn't get enough matches, try fallback methods
+        if filled_count < original_puzzle.count('0') // 2:  # If we filled less than half
+            print("Debug: Trying fallback extraction methods...")
+            
+            # Method 2: Look for any complete 9x9 grid in the response
+            lines = solution_part.split('\n')
+            grid_digits = []
+            consecutive_digit_lines = 0
+            
+            for line in lines:
+                digits_in_line = [c for c in line if c.isdigit()]
+                
+                if len(digits_in_line) == 9:
+                    grid_digits.extend(digits_in_line)
+                    consecutive_digit_lines += 1
+                    
+                    if consecutive_digit_lines == 9:
+                        break
+                else:
+                    if consecutive_digit_lines > 0 and consecutive_digit_lines < 9:
+                        grid_digits = grid_digits[:-consecutive_digit_lines*9]
+                    consecutive_digit_lines = 0
+            
+            # If we found a complete grid, use it
+            if len(grid_digits) == 81:
+                try:
+                    grid_ints = [int(d) for d in grid_digits]
+                    if all(1 <= d <= 9 for d in grid_ints):
+                        print("Debug: Using complete grid fallback")
+                        return ''.join(grid_digits)
+                except ValueError:
+                    pass
+        
+        result_string = ''.join(result_grid)
+        return result_string
     
     def evaluate_single_puzzle(self, puzzle: str, solution: str, clue_count: int) -> dict:
         """Evaluate model on a single puzzle"""
@@ -321,25 +385,41 @@ Begin solving:"""
         }
 
 def main():
+    print("=== Sudoku Baseline Evaluation ===")
+    print("This script evaluates a language model on Sudoku solving")
+    print()
+    
+    # Check if test data exists
+    test_file = "data/test_set.csv"
+    if not os.path.exists(test_file):
+        print(f"❌ Test file {test_file} not found.")
+        print("Please run data_preparation.py first to create the datasets.")
+        print()
+        print("Run: python data_preparation.py")
+        return
+    
     # Initialize wandb
     wandb.init(
         project="sudoku-rl-baseline",
         name=f"qwen-baseline-{datetime.now().strftime('%Y%m%d_%H%M%S')}",
         config={
-            "model": "Qwen/Qwen2.5-7B-Instruct",
+            "model": "Language Model",
             "task": "sudoku_solving",
             "evaluation_type": "baseline"
         }
     )
     
     # Initialize evaluator
-    evaluator = SudokuEvaluator()
-    
-    # Run evaluation
-    test_file = "data/test_set.csv"  # This will be created by the data prep script
-    
-    if not os.path.exists(test_file):
-        print(f"Test file {test_file} not found. Please run data preparation first.")
+    try:
+        evaluator = SudokuEvaluator()
+    except Exception as e:
+        print(f"❌ Failed to load model: {e}")
+        print()
+        print("Please try:")
+        print("1. huggingface-cli login")
+        print("2. Check your internet connection")
+        print("3. Make sure you have the required packages installed")
+        wandb.finish()
         return
     
     print("Starting baseline evaluation...")
